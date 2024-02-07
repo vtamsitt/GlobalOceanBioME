@@ -553,7 +553,7 @@ version = "1.2.0"
 deps = ["Adapt", "JLD2", "KernelAbstractions", "Oceananigans", "Roots", "StructArrays"]
 git-tree-sha1 = "ec1b9e8e1cebc7cbc3d3528f743e94e93657bd0f"
 uuid = "a49af516-9db8-4be4-be45-1dad61c5a376"
-version = "0.4.0"
+version = "0.10.0"
 
 [[deps.Oceananigans]]
 deps = ["Adapt", "CUDA", "Crayons", "CubedSphere", "Dates", "DocStringExtensions", "FFTW", "Glob", "IncompleteLU", "InteractiveUtils", "IterativeSolvers", "JLD2", "KernelAbstractions", "LinearAlgebra", "Logging", "MPI", "NCDatasets", "OffsetArrays", "OrderedCollections", "PencilArrays", "PencilFFTs", "Pkg", "Printf", "Random", "Rotations", "SeawaterPolynomials", "SparseArrays", "Statistics", "StructArrays"]
