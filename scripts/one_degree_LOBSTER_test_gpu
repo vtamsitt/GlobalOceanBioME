@@ -1,0 +1,141 @@
+using ClimaOcean.NearGlobalSimulations: one_degree_near_global_simulation, cyclic_interpolate, current_time_index, next_time_index
+
+using Oceananigans, DataDeps, JLD2, OceanBioME, GlobalOceanBioME
+using Oceananigans.Units
+using Oceananigans.Utils: WallTimeInterval
+using Oceananigans.BuoyancyModels: buoyancy
+using Oceananigans.Models.HydrostaticFreeSurfaceModels: VerticalVorticityField
+using Oceananigans.TurbulenceClosures.CATKEVerticalDiffusivities:
+    MixingLength, TurbulentKineticEnergyEquation, CATKEVerticalDiffusivity
+using Oceananigans.TurbulenceClosures: IsopycnalSkewSymmetricDiffusivity
+
+using Oceananigans.Architectures: arch_array
+
+
+
+import Oceananigans.TurbulenceClosures: cell_diffusion_timescale
+
+import Adapt: adapt_structure, adapt
+
+#define architecture
+architecture = GPU()
+
+cell_diffusion_timescale(::IsopycnalSkewSymmetricDiffusivity, args...) = Inf
+
+#Boundary layer turbulence closure option
+convective_κz = 0.1
+background_κz = 0.0
+background_νz = 0.01
+convective_νz = 0.0
+
+cavd = ConvectiveAdjustmentVerticalDiffusivity(; convective_κz, background_κz, background_νz, convective_νz)
+
+boundary_layer_turbulence_closure = cavd
+
+#define BGC model
+
+#test LOBSTER medium complexity with carbonate system parameters
+biogeochemistry = LOBSTER
+#define air-sea CO2 flux
+DIC_bcs = FieldBoundaryConditions(top = GasExchange(; gas = :CO₂))
+
+start_time = 345days
+stop_time = start_time + 2*365days
+with_isopycnal_skew_symmetric_diffusivity = true
+
+
+#define simulation
+simulation = one_degree_near_global_simulation(architecture;
+    start_time, stop_time,
+    with_isopycnal_skew_symmetric_diffusivity,
+    boundary_layer_turbulence_closure,
+    isopycnal_κ_skew = 900.0,
+    isopycnal_κ_symmetric = 900.0,
+    interior_background_vertical_viscosity = 1e-4,
+    surface_background_vertical_viscosity = 1e-4,
+    biogeochemistry, #only for bgc
+    biogeochemistry_kwargs = (carbonates = true,open_bottom = true, surface_photosynthetically_active_radiation = OneDegreeSurfacePAR(architecture)), #here all LOBSTER kw args are defined
+    tracers = (:NO₃, :NH₄, :P, :Z, :sPOM, :bPOM, :DOM, :DIC, :Alk, :T, :S) #remove when not running with bgc
+)
+
+
+#define output
+slices_save_interval = 2days
+fields_save_interval = 1days
+Nx, Ny, Nz = size(simulation.model.grid)
+
+mkdir("data")
+dir = "data"
+closure_name = typeof(boundary_layer_turbulence_closure).name.wrapper
+output_prefix = "near_global_$(Nx)_$(Ny)_$(Nz)_$closure_name"
+with_isopycnal_skew_symmetric_diffusivity || (output_prefix *= "_no_gm")
+
+simulation.output_writers[:checkpointer] = Checkpointer(simulation.model; dir,
+                                                        prefix = output_prefix * "_checkpointer",
+                                                        schedule = TimeInterval(365days),
+                                                        cleanup = true,
+                                                        overwrite_existing = true)
+
+
+model = simulation.model
+
+simulation.output_writers[:fields] = JLD2OutputWriter(model, merge(model.velocities, model.tracers); dir,
+                                                      schedule = TimeInterval(fields_save_interval),
+                                                      filename = output_prefix * "_fields",
+                                                      with_halos = true,
+                                                      overwrite_existing = true)
+
+
+#Define BGC initial conditions
+
+#These are initial conditions from Jago's example run using NPZD model.
+#need to create file for other variables (DIC, Alk) from Copernicus data
+## Data for the one_degree_global_simulation
+branch_url = "https://github.com/OceanBioME/OceanBioMEArtifacts/raw/main"
+dir = "near_global/one_degree/2010"
+par_name = "PAR.jld2"
+initial_conditions_name = "initial_conditions.jld2"
+
+par_url = joinpath(branch_url, dir, par_name)
+initial_conditions_url = joinpath(branch_url, dir, initial_conditions_name)
+
+dep = DataDep("2010_near_global_bgc",
+              "PAR and intiial conditions for proof of concept near global one degree bgc model ",
+              [par_url, initial_conditions_url])
+
+DataDeps.register(dep)
+""" Load initial conditions from Copernicus models.
+
+P and N are a direct downsampling and unit conversion from https://doi.org/10.48670/moi-00015
+Z is downsampled and unit converted from https://doi.org/10.48670/moi-00020 and then divided by
+the mixed layer depth from https://doi.org/10.48670/moi-00024, and then applied uniformly over
+the mixed region
+"""
+file = jldopen(datadep"2010_near_global_bgc/initial_conditions.jld2")
+N_init = arch_array(architecture, file["N"])
+P_init = arch_array(architecture, file["P"])
+Z_init = arch_array(architecture, file["Z"])
+close(file)
+
+set!(model, N = N_init, P = P_init, Z = Z_init, NH₄ = 0.05, DIC = 2200.0, Alk = 2409.0)
+
+#define callbacks
+simulation.callbacks[:nan_checker] = Callback(Oceananigans.Simulations.NaNChecker(; fields = merge(model.tracers, model.velocities), erroring = true), IterationInterval(1))
+
+#define time step and run length
+simulation.Δt = 20minute
+
+#Now run the simulation!
+@info "Running a simulation with Δt = $(prettytime(simulation.Δt)) from $(prettytime(simulation.model.clock.time)) until $(prettytime(simulation.stop_time))"
+
+run!(simulation)
+simulation.stop_time = time(simulation) + 1days
+
+#Now we're sure it works, we can experiment with longer simulations by changing the time step and run length
+
+simulation.Δt = 20minutes
+simulation.stop_time = time(simulation) + 365days
+@info "Running a simulation with Δt = $(prettytime(simulation.Δt)) from $(prettytime(simulation.model.clock.time)) until $(prettytime(simulation.stop_time))"
+
+run!(simulation; pickup = false)
+
